@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eagle Hills · Water Pulse Monitor</title>
+<style>
+:root{color-scheme:dark;font:15px system-ui;background:#0c1721;color:#e8f0f7}
+*{box-sizing:border-box}body{max-width:1280px;margin:auto;padding:24px}
+header{background:#14293a;border:1px solid #2d4b60;border-radius:16px;padding:25px}
+h1{margin:.4em 0;font-size:clamp(24px,5vw,37px)}h2{font-size:17px;margin:0}
+p{color:#b0c4d4;line-height:1.5}.eyebrow{font-size:11px;letter-spacing:.18em;color:#80dfce;font-weight:700}
+form,nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+input,button{font:inherit;border:1px solid #406075;background:#182d3e;color:inherit;border-radius:7px;padding:9px 12px}
+input{flex:1;min-width:min(100%,240px)}button{cursor:pointer}button[aria-pressed=true],button.primary{background:#a0efdc;color:#143429}
+section{background:#122332;border:1px solid #294658;border-radius:12px;padding:15px;margin:12px 0}
+.heading{display:flex;justify-content:space-between;margin-bottom:12px;gap:8px}.hint,small{color:#a9bfce;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:8px}
+article{padding:12px;background:#1a3041;border:1px solid #355265;border-radius:8px}
+.unit{display:flex;justify-content:space-between;align-items:center;gap:5px;font-weight:700}
+.led{height:10px;width:10px;flex:none;border-radius:50%;background:#536d7e}
+@keyframes pulse{0%,55%{background:#70ffd0;box-shadow:0 0 12px 3px #45e3ab}100%{background:#536d7e;box-shadow:none}}
+.stamp{font-size:12px;margin-top:4px;line-height:1.4}.label{display:block;margin-top:12px;font-size:9px;letter-spacing:.07em;color:#a9bfce}
+.status{color:#8be8d1;font-weight:700}.status.error{color:#ffcd83}footer{color:#a9bfce;font-size:12px;line-height:1.6;margin-top:16px}
+@media(max-width:600px){body{padding:10px}header{padding:16px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}article{padding:9px}}
+</style>
+<header>
+<div class="eyebrow">EAGLE HILLS / WATER METERS</div>
+<h1>Water Pulse Monitor</h1>
+<p>Floors 3–8 · Apartment activity · Addis Ababa time</p>
+<div id="status" class="status" role="status">Demo mode · simulated pulses</div>
+</header>
+<form id="connect">
+<input id="endpoint" type="url" required placeholder="https://your-gateway/eagle-hills/water-pulses" aria-label="Node-RED HTTPS endpoint">
+<button class="primary">Connect live</button>
+<button type="button" id="demo">Run demo</button>
+</form>
+<nav id="filters" aria-label="Select floor"></nav>
+<main id="meters"></main>
+<footer>Green flash indicates a newly observed ON pulse. Each refresh shows the latest event for each apartment. Times are shown in Addis Ababa (UTC+3).</footer>
+<script>
+const meterView = document.querySelector('#meters');
+const filters = document.querySelector('#filters');
+const status = document.querySelector('#status');
+const format = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Africa/Addis_Ababa', day: '2-digit', month: 'short',
+  year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+});
+let groups = [], selected = 'all', mode = 0, timer, controller;
+const cards = new Map();
+const seen = new Map();
+
+function element(tag, className, text) {
+  const item = document.createElement(tag);
+  item.className = className;
+  if (text !== undefined) item.textContent = text;
+  return item;
+}
+
+function showStatus(message, warning = false) {
+  status.textContent = message;
+  status.classList.toggle('error', warning);
+}
+
+function render() {
+  filters.replaceChildren();
+  meterView.replaceChildren();
+  cards.clear();
+  for (const floor of ['all', ...groups.map(group => group.floor)]) {
+    const button = element('button', '', floor === 'all' ? 'All floors' : 'Floor ' + floor);
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(floor === selected));
+    button.onclick = () => { selected = floor; render(); };
+    filters.append(button);
+  }
+  for (const group of groups) {
+    if (selected !== 'all' && group.floor !== selected) continue;
+    const section = element('section', '');
+    const heading = element('div', 'heading');
+    heading.append(element('h2', '', 'Floor ' + group.floor), element('small', '', group.meters.length + ' apartments'));
+    const grid = element('div', 'grid');
+    for (const meter of group.meters) {
+      const card = element('article', '');
+      const unit = element('div', 'unit', 'Apartment ' + meter.apartment);
+      const led = element('span', 'led');
+      led.setAttribute('aria-hidden', 'true');
+      unit.append(led);
+      const stamp = element('div', 'stamp');
+      card.append(unit, element('span', 'label', 'LAST ON PULSE'), stamp);
+      grid.append(card);
+      cards.set(meter.key, {led, stamp});
+      updateCard(meter, false);
+    }
+    section.append(heading, grid);
+    meterView.append(section);
+  }
+}
+
+function updateCard(meter, flash) {
+  const card = cards.get(meter.key);
+  if (!card) return;
+  const date = new Date(meter.at || '');
+  card.stamp.textContent = Number.isFinite(date.getTime()) ? format.format(date) : 'No pulse observed';
+  if (flash) card.led.animate([
+    {background: '#70ffd0', boxShadow: '0 0 12px 3px #45e3ab', offset: 0},
+    {background: '#70ffd0', boxShadow: '0 0 12px 3px #45e3ab', offset: 0.55},
+    {background: '#536d7e', boxShadow: 'none', offset: 1}
+  ], 600);
+}
+
+function accept(next) {
+  const previousLayout = JSON.stringify(groups.map(group => group.meters.map(meter => meter.key)));
+  const nextLayout = JSON.stringify(next.map(group => group.meters.map(meter => meter.key)));
+  groups = next;
+  if (previousLayout !== nextLayout) render();
+  for (const group of groups) {
+    for (const meter of group.meters) {
+      const before = seen.get(meter.key);
+      updateCard(meter, Boolean(meter.eventId && before !== undefined && meter.eventId !== before));
+      seen.set(meter.key, meter.eventId || '');
+    }
+  }
+}
+
+function changeMode() {
+  mode++;
+  clearTimeout(timer);
+  if (controller) controller.abort();
+  seen.clear();
+  groups = [];
+  selected = 'all';
+  render();
+  return mode;
+}
+
+function demo() {
+  const currentMode = changeMode();
+  showStatus('Demo mode · simulated pulses');
+  const sample = [3,4,5,6,7,8].map(floor => {
+    const units = Array.from({length:11}, (_,i) => String(i+1));
+    if ([3,4,8].includes(floor)) units.splice(5,1,'6A','6B');
+    return {floor, meters:units.map(apartment => ({key:floor + ':app' + apartment, apartment, at:null, eventId:null}))};
+  });
+  accept(sample);
+  const meters = sample.flatMap(group => group.meters);
+  function tick() {
+    if (currentMode !== mode) return;
+    const meter = meters[Math.floor(Math.random() * meters.length)];
+    meter.at = new Date().toISOString();
+    meter.eventId = String(Date.now());
+    accept(sample);
+    timer = setTimeout(tick, 800);
+  }
+  timer = setTimeout(tick, 800);
+}
+
+document.querySelector('#demo').onclick = demo;
+document.querySelector('#connect').onsubmit = event => {
+  event.preventDefault();
+  let url;
+  try { url = new URL(document.querySelector('#endpoint').value.trim()); }
+  catch { showStatus('Enter a valid HTTPS endpoint.', true); return; }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    showStatus('Enter an HTTPS endpoint without credentials in the URL.', true);
+    return;
+  }
+  const currentMode = changeMode();
+  showStatus('Connecting to Node-RED…');
+  async function poll() {
+    if (currentMode !== mode) return;
+    controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch(url.href, {cache:'no-store', signal:controller.signal});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      if (!Array.isArray(data.groups) || !data.groups.every(group => Array.isArray(group.meters))) throw new Error('Unexpected endpoint response');
+      if (currentMode !== mode) return;
+      accept(data.groups);
+      showStatus('Live · Node-RED connected');
+    } catch (error) {
+      if (currentMode !== mode) return;
+      showStatus('Live feed unavailable · ' + error.message, true);
+    } finally {
+      clearTimeout(timeout);
+      if (currentMode === mode) timer = setTimeout(poll, 1000);
+    }
+  }
+  poll();
+};
+demo();
+</script>
+</html>
